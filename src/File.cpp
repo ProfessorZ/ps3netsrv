@@ -133,7 +133,12 @@ int File::open(const char *path, int flags)
 			strcpy(filepath, path);
 
 			file_stat_t st;
-			fstat_file(fd, &st); part_size = st.file_size; // all parts (except last) must be the same size of size of .iso.0
+			if (fstat_file(fd, &st) < 0)
+			{
+				free(filepath);
+				return FAILED;
+			}
+			part_size = st.file_size; // all parts (except last) must be the same size of size of .iso.0
 
 			is_multipart = 1; // count parts
 
@@ -483,7 +488,15 @@ int64_t File::seek(int64_t offset, int whence)
 	}
 
 	// seek multi part iso (2015 AV)
-	index = (int)(offset / part_size);
+	int64_t part_index = offset / part_size;
+	if ((part_index < 0) || (part_index >= is_multipart))
+	{
+		printf("ERROR: seek offset is out of range for this multi-part file (part %lld of %d).\n",
+			(long long int)part_index, is_multipart);
+		return FAILED;
+	}
+
+	index = (int8_t)part_index;
 
 	return seek_file(fp[index], (offset % part_size), whence);
 }

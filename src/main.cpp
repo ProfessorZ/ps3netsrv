@@ -771,12 +771,12 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 	if ((!client->ro_file) || (!client->buf))
 		return FAILED;
 
-	uint64_t offset = BE32(cmd->start_sector)*(client->CD_SECTOR_SIZE);
+	uint64_t offset = (uint64_t)BE32(cmd->start_sector) * client->CD_SECTOR_SIZE;
 	uint32_t sector_count = BE32(cmd->sector_count);
 
 	DPRINTF("Read CD 2048 (%i) %x %x\n", client->CD_SECTOR_SIZE, BE32(cmd->start_sector), sector_count);
 
-	if((sector_count * 2048) > BUFFER_SIZE)
+	if(((uint64_t)sector_count * 2048) > BUFFER_SIZE)
 	{
 		// This is just to save some uneeded code. PS3 will never request such a high number of sectors
 		printf("ERROR: Too many sectors read!\n");
@@ -1387,12 +1387,28 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 	struct dirent *entry;
 	size_t d_name_len;
 
-	char path[MAX_PATH_LEN]; strcpy(path, dir_path);
+	// `path` is sized to path_len (as computed by the caller) rather than a fixed
+	// MAX_PATH_LEN stack buffer, since dir_path/path can legitimately exceed
+	// MAX_PATH_LEN (e.g. a long client-supplied OPEN_DIR path, or deep recursion).
+	char *path = (char *)malloc(path_len);
+	if(!path) return;
+
+	if((size_t)snprintf(path, path_len, "%s", dir_path) >= path_len)
+	{
+		free(path);
+		return;
+	}
 
 	normalize_path(path, true);
 	DIR *dir2 = opendir(path);
-	strcat(path, "/");
+
 	size_t dir2path_len = strlen(path);
+	if(dir2path_len + 1 < path_len)
+	{
+		path[dir2path_len] = '/';
+		path[dir2path_len + 1] = '\0';
+		dir2path_len++;
+	}
 
 	if(dir2)
 	{
@@ -1444,9 +1460,9 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 			dir_entries[items].mtime = BE64(st.mtime);
 
 			if(subdirs)
-				sprintf(dir_entries[items].name, "%s", path + dirpath_len);
+				snprintf(dir_entries[items].name, sizeof(dir_entries[items].name), "%s", path + dirpath_len);
 			else
-				sprintf(dir_entries[items].name, "%s", entry->d_name);
+				snprintf(dir_entries[items].name, sizeof(dir_entries[items].name), "%s", entry->d_name);
 
 			path[dir2path_len] = '\0';
 
@@ -1455,6 +1471,7 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 		}
 		closedir(dir2); dir2 = NULL;
 	}
+	free(path);
 	*nitems = items;
 }
 

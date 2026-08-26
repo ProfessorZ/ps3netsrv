@@ -329,13 +329,6 @@ int stat_file(const char *path, file_stat_t *fs)
 	if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_READONLY))
 		fs->mode |= S_IWRITE | S_IEXEC;
 
-	if (FindNextFile(fh, &wfd))
-	{
-		FindClose(fh);
-		//printf("Stat failed here.\n");
-		return FAILED;
-	}
-
 	FindClose(fh);
 	return SUCCEEDED;
 }

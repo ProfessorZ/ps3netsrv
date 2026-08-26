@@ -662,6 +662,14 @@ uint8_t *VIsoFile::buildPathTable(bool msb, bool joliet, size_t *retSize)
 	dirList = rootList;
 	while ((dirList) && (i < 65536))
 	{
+		// Worst-case entry size (8-byte header + MAX_ISODIR name bytes + odd-length pad byte) must
+		// still fit before we write anything at `p`, since len_di isn't known until after the
+		// strncpy_upper/utf8_to_ucs2 call below, which itself writes directly into the buffer.
+		if ((p + 8 + MAX_ISODIR + 1) >= (tempBuf + tempBufSize))
+		{
+			return NULL;
+		}
+
 		Iso9660PathTable *table = (Iso9660PathTable *)p;
 		Iso9660DirectoryRecord *record;
 		uint16_t parentIdx;
@@ -1266,6 +1274,11 @@ bool VIsoFile::build(const char *inDir)
 	pathTableM = buildPathTable(true, false, &pathTableSize);
 	pathTableJolietL = buildPathTable(false, true, &pathTableSizeJoliet);
 	pathTableJolietM = buildPathTable(true, true, &pathTableSizeJoliet);
+
+	if ((!pathTableL) || (!pathTableM) || (!pathTableJolietL) || (!pathTableJolietM))
+	{
+		return false;
+	}
 
 	uint32_t isoLba = (0xA000 / SECTOR_SIZE) + (bytesToSectors(pathTableSize) * 2) + (bytesToSectors(pathTableSizeJoliet) * 2);
 	uint32_t jolietLba = isoLba + dirsSizeSectors;

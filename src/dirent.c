@@ -127,11 +127,8 @@ struct dirent2 *readdir2( DIR2 *dir )
 	{
 		if ( !FindNextFile( dir->dd_handle, dir->dd_finddata ))
 		{
-			if ( GetLastError() == ERROR_NO_MORE_FILES )
-			{
-				errno = SUCCEEDED;
-				return NULL;
-			}
+			errno = ( GetLastError() == ERROR_NO_MORE_FILES ) ? SUCCEEDED : EBADF;
+			return NULL;
 		}
 	}
 
