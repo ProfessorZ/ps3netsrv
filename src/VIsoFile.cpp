@@ -554,50 +554,8 @@ void VIsoFile::reset(void)
 
 DirList *VIsoFile::getParent(DirList *dirList)
 {
-	if(!dirList)
-		return dirList;
-
-	if (dirList == rootList)
-		return dirList;
-
-	DirList *tempList = rootList;
-
-	char *parentPath;
-	parentPath = dupString(dirList->path, dirList->full_len); if(!parentPath) return dirList;
-
-	char *slash = strrchr(parentPath + dirList->path_len, '/'); if(slash) *slash = 0;
-
-	while (tempList)
-	{
-		if (strcmp(parentPath, tempList->path) == SUCCEEDED)
-		{
-			delete[] parentPath;
-			return tempList;
-		}
-
-		tempList = tempList->next;
-	}
-
-	delete[] parentPath;
-	return dirList;
-}
-
-bool VIsoFile::isDirectChild(DirList *dir, DirList *parentCheck)
-{
-	if ((!dir) || (!parentCheck)) return false;
-
-	if (strcmp(dir->path, parentCheck->path) == SUCCEEDED)
-		return false;
-
-	char *p = strstr(dir->path, parentCheck->path);
-	if (p != dir->path)
-		return false;
-
-	p += parentCheck->full_len + 1;
-	if (strchr(p, '/'))
-		return false;
-
-	return true;
+	// parent links are populated in build(); rootList points to itself.
+	return dirList ? dirList->parent : NULL;
 }
 
 Iso9660DirectoryRecord *VIsoFile::findDirRecord(const char *dirName, Iso9660DirectoryRecord *parentRecord, size_t size, bool joliet)
@@ -913,10 +871,11 @@ bool VIsoFile::buildContent(DirList *dirList, bool joliet)
 		fileList = fileList->next;
 	}
 
-	tempList = dirList->next;
+	// firstChild/nextSibling form dirList's direct-children list by
+	// construction (see build()), so no per-node parent check is needed.
+	tempList = dirList->firstChild;
 	while (tempList)
 	{
-		if (isDirectChild(tempList, dirList))
 		{
 			uint32_t offs;
 			record = (Iso9660DirectoryRecord *)malloc(SECTOR_SIZE);
@@ -970,7 +929,7 @@ bool VIsoFile::buildContent(DirList *dirList, bool joliet)
 			free(record);
 		}
 
-		tempList = tempList->next;
+		tempList = tempList->nextSibling;
 	}
 
 	size_t size = (p - tempBuf);
@@ -1129,6 +1088,9 @@ bool VIsoFile::build(const char *inDir)
 	rootList->fileList = NULL;
 	rootList->idx = idx++;
 	rootList->next = NULL;
+	rootList->parent = rootList; // root is its own parent (matches getParent)
+	rootList->firstChild = NULL;
+	rootList->nextSibling = NULL;
 	dirList = tail = rootList;
 
 	while (dirList)
@@ -1138,6 +1100,9 @@ bool VIsoFile::build(const char *inDir)
 			return false;
 
 		dlen = dirList->full_len;
+		// dirList's children are appended consecutively here, so build its
+		// sibling chain as we go -- that chain is exactly its direct children.
+		DirList *lastChild = NULL;
 		for (int i = 0; i < count; i++)
 		{
 			#ifdef WIN32
@@ -1154,6 +1119,15 @@ bool VIsoFile::build(const char *inDir)
 			tail->idx = idx++;
 			tail->fileList = NULL;
 			tail->next = NULL;
+			tail->parent = dirList;
+			tail->firstChild = NULL;
+			tail->nextSibling = NULL;
+
+			if (lastChild)
+				lastChild->nextSibling = tail;
+			else
+				dirList->firstChild = tail;
+			lastChild = tail;
 
 			free(dirs[i]);
 		}

@@ -522,6 +522,25 @@ int File::fstat(file_stat_t *fs)
 	return ret;
 }
 
+bool File::supportsBulkRead() const
+{
+	// Multipart: read() only handles a span straddling a single part
+	// boundary; a big bulk read could cross more than one and silently
+	// short-read.
+	if (is_multipart)
+		return false;
+
+#ifndef NOSSL
+	// Encrypted (3k3y/Redump): read() decrypts an entire call's worth of
+	// data using one region's parameters; a big bulk read could straddle
+	// more than one encrypted/unencrypted region.
+	if (enc_type_ != kDiscTypeNone)
+		return false;
+#endif
+
+	return true;
+}
+
 #ifndef NOSSL
 ///// encrypted-3k3yredump-isos by NvrBst ///////
 
