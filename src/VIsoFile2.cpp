@@ -562,9 +562,15 @@ void VIsoFile::reset(void)
 
 void VIsoFile::fd_reset(void)
 {
-	close_file(fd);
+	// 0 is this class's "no cached file" sentinel (see the constructor), not a
+	// real descriptor -- closing it unguarded would close stdin on POSIX, and
+	// makes reset() unsafe to call more than once.
+	if (fd)
+	{
+		close_file(fd);
+		fd = 0;
+	}
 
-	fd = 0;
 	lastPath = NULL;
 }
 
@@ -1277,6 +1283,10 @@ bool VIsoFile::build(const char *inDir)
 
 	if ((!pathTableL) || (!pathTableM) || (!pathTableJolietL) || (!pathTableJolietM))
 	{
+		// Free the directory tree and any path tables already built; otherwise a
+		// caller that reuses this object for another open() would leak them
+		// (open() only calls close() when fsBuf is set, which it isn't yet here).
+		reset();
 		return false;
 	}
 

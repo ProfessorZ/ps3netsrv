@@ -1465,7 +1465,7 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 
 			if(dir2path_len + d_name_len >= path_len) continue;
 
-			sprintf(path + dir2path_len, "%s", entry->d_name);
+			snprintf(path + dir2path_len, path_len - dir2path_len, "%s", entry->d_name);
 
 			if(stat_file(path, &st) < 0)
 			{

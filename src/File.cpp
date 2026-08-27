@@ -136,6 +136,8 @@ int File::open(const char *path, int flags)
 			if (fstat_file(fd, &st) < 0)
 			{
 				free(filepath);
+				close_file(fd);
+				fd = INVALID_FD;
 				return FAILED;
 			}
 			part_size = st.file_size; // all parts (except last) must be the same size of size of .iso.0

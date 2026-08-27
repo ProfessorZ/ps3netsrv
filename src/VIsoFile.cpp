@@ -1251,6 +1251,10 @@ bool VIsoFile::build(const char *inDir)
 
 	if ((!pathTableL) || (!pathTableM) || (!pathTableJolietL) || (!pathTableJolietM))
 	{
+		// Free the directory tree and any path tables already built; otherwise a
+		// caller that reuses this object for another open() would leak them
+		// (open() only calls close() when fsBuf is set, which it isn't yet here).
+		reset();
 		return false;
 	}
 
