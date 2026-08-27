@@ -31,9 +31,20 @@ if [ ! -d "$ROOT_DIR" ]; then
 	exit 1
 fi
 
+# An unreadable share looks identical to an empty one from a bare listing, so
+# check access first -- otherwise the wrong uid gets reported as a missing
+# mount, which is the opposite of the actual fix.
+if [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; then
+	echo "ERROR: '$ROOT_DIR' is not readable by uid $(id -u):$(id -g)." >&2
+	echo "Run with --user (or compose 'user:') matching the owner of your media." >&2
+	exit 1
+fi
+
 # /games exists in the image, so a forgotten -v serves an empty share rather
 # than failing. Say so instead of letting it look like a working setup.
-if [ -z "$(ls -A "$ROOT_DIR" 2>/dev/null)" ]; then
+# -print -quit stops at the first entry rather than walking a whole media
+# library just to answer "is there anything here at all".
+if [ -z "$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
 	echo "WARNING: '$ROOT_DIR' is empty - did you forget to mount your media?" >&2
 fi
 
