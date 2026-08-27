@@ -1,7 +1,5 @@
 # ps3netsrv
 ![Build Status](https://github.com/aldostools/ps3netsrv/actions/workflows/build.yml/badge.svg)
-![Build Status](https://github.com/aldostools/ps3netsrv/actions/workflows/openwrt-24.yml/badge.svg)
-![Build Status](https://github.com/aldostools/ps3netsrv/actions/workflows/openwrt-snapshot.yml/badge.svg)
 
 ps3netsrv is a server application used to stream content from a remote server to the PS3.
 
@@ -172,10 +170,6 @@ https://github.com/aldostools/webMAN-MOD/tree/master/_Projects_/ps3netsrv
 Docker container: https://github.com/shawly/docker-ps3netsrv
 
 Java / Android: https://github.com/jhonathanc/ps3netsrv-android
-
-OpenWrt<br>
-All platforms (arm, arc, mips, mipsel, i386, powerpc, x86): https://github.com/jhonathanc/ps3netsrv/releases<br> 
-SRC: https://github.com/jhonathanc/ps3netsrv-openwrt<br>
 
 Synology (maintained by @Hirador)
 https://synocommunity.com/package/ps3netsrv <br>

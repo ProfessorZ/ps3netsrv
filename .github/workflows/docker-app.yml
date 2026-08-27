@@ -1,7 +1,4 @@
 # Builds and publishes the ps3netsrv application image.
-#
-# Distinct from docker-image.yml, which publishes the OpenWrt *build
-# environment* used by the openwrt-* workflows.
 name: Build and Push ps3netsrv Image
 
 on:
