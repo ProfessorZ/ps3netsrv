@@ -27,6 +27,7 @@ typedef struct _file_stat_t
 
 // Threads
 typedef HANDLE thread_t;
+typedef CRITICAL_SECTION mutex_t;
 
 // Files
 #define INVALID_FD	INVALID_HANDLE_VALUE
@@ -66,6 +67,7 @@ typedef int socklen_t;
 
 // Threads
 typedef pthread_t thread_t;
+typedef pthread_mutex_t mutex_t;
 
 // Files
 #define INVALID_FD	-1
@@ -81,6 +83,11 @@ typedef int file_t;
 
 int create_start_thread(thread_t *thread, void *(*start_routine)(void*), void *arg);
 int join_thread(thread_t thread);
+
+int mutex_init(mutex_t *mutex);
+int mutex_destroy(mutex_t *mutex);
+int mutex_lock(mutex_t *mutex);
+int mutex_unlock(mutex_t *mutex);
 
 file_t open_file(const char *path, int oflag);
 int close_file(file_t fd);

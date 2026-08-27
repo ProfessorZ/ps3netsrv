@@ -24,24 +24,26 @@ class Server:
         self.root = root
 
     def assert_alive(self):
-        """Assert the server process survived -- the property these tests care
-        about after feeding it malicious or edge-case input.
+        """Assert the server survived and is still serving.
 
-        This deliberately does NOT open a second connection to probe liveness.
-        Doing so would exercise the accept loop's same-IP reconnection path
-        (every test connects from 127.0.0.1), which has a pre-existing race
-        unrelated to anything under test here: it force-closes and joins the
-        previous slot while that client's thread is concurrently running
-        finalize_client(), which memsets the whole client_t -- including .s and
-        .thread. Losing that race resets the incoming connection. Tests that
-        want to prove the server is still *serving* should reuse their existing
-        connection for another round-trip instead (see the CLOSEFILE check in
-        test_multipart_seek_offset_out_of_range_is_rejected).
+        The reconnect here is deliberate: every test connects from 127.0.0.1,
+        so a second connection drives the accept loop's same-IP reconnection
+        path -- reclaiming the previous slot while that client's thread is
+        still finishing. That is exactly the path the clients[] locking fixes,
+        so probing it keeps it covered.
         """
         assert self.proc.poll() is None, (
             "server process exited unexpectedly: "
             f"{self.proc.stdout.read().decode(errors='replace') if self.proc.stdout else ''}"
         )
+
+        sock = connect(self.port)
+        try:
+            sock.sendall(open_file_cmd(b"/CLOSEFILE"))
+            result = recv_exact(sock, 16)  # netiso_open_result
+            assert len(result) == 16, "server did not answer a fresh connection"
+        finally:
+            sock.close()
 
 
 @pytest.fixture(scope="session")

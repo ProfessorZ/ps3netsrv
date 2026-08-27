@@ -23,6 +23,31 @@ int join_thread(thread_t thread)
 	if (ret == 0xFFFFFFFF)
 		return (int)ret;
 
+	CloseHandle(thread);
+	return SUCCEEDED;
+}
+
+int mutex_init(mutex_t *mutex)
+{
+	InitializeCriticalSection(mutex);
+	return SUCCEEDED;
+}
+
+int mutex_destroy(mutex_t *mutex)
+{
+	DeleteCriticalSection(mutex);
+	return SUCCEEDED;
+}
+
+int mutex_lock(mutex_t *mutex)
+{
+	EnterCriticalSection(mutex);
+	return SUCCEEDED;
+}
+
+int mutex_unlock(mutex_t *mutex)
+{
+	LeaveCriticalSection(mutex);
 	return SUCCEEDED;
 }
 
@@ -343,6 +368,26 @@ int create_start_thread(thread_t *thread, void *(*start_routine)(void*), void *a
 int join_thread(thread_t thread)
 {
 	return pthread_join(thread, NULL);
+}
+
+int mutex_init(mutex_t *mutex)
+{
+	return pthread_mutex_init(mutex, NULL);
+}
+
+int mutex_destroy(mutex_t *mutex)
+{
+	return pthread_mutex_destroy(mutex);
+}
+
+int mutex_lock(mutex_t *mutex)
+{
+	return pthread_mutex_lock(mutex);
+}
+
+int mutex_unlock(mutex_t *mutex)
+{
+	return pthread_mutex_unlock(mutex);
 }
 
 file_t open_file(const char *path, int oflag)
