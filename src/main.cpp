@@ -63,6 +63,14 @@ typedef struct _client_t
 	int subdirs;
 } client_t;
 
+// Sentinel for client_t.s, which is a plain int socket -- not a file_t. The
+// INVALID_FD / FD_OK macros describe files, and file_t is a HANDLE on Win32,
+// so they must not be used on sockets. Sockets here are already tested with
+// "< 0" (see the accept() result); "> 0" additionally excludes 0, which is
+// stdin rather than any socket this server owns.
+#define NO_SOCKET (-1)
+#define SOCKET_OK(sock) ((sock) > 0)
+
 // Guards the slot bookkeeping in clients[] -- .connected, .s, .thread and
 // .has_thread -- which the accept loop and each client thread both touch.
 // Declared outside the MAKEISO guard because finalize_client() uses it to hand
@@ -215,10 +223,10 @@ static void finalize_client(client_t *client)
 	// that has already been recycled onto another connection.
 	mutex_lock(&clients_mutex);
 	int s = client->s;
-	client->s = INVALID_FD;
+	client->s = NO_SOCKET;
 	mutex_unlock(&clients_mutex);
 
-	if(FD_OK(s) && (s > 0))
+	if(SOCKET_OK(s))
 	{
 		shutdown(s, SHUT_RDWR);
 		closesocket(s);
@@ -2317,7 +2325,7 @@ int main(int argc, char *argv[])
 		}
 
 		int reconnection;
-		int old_s = INVALID_FD;
+		int old_s = NO_SOCKET;
 		int join_old;
 		thread_t old_thread;
 
@@ -2342,7 +2350,7 @@ int main(int argc, char *argv[])
 			// Take the socket from the slot so its thread's finalize_client()
 			// cannot also close it -- exactly one side gets a real descriptor.
 			old_s = clients[i].s;
-			clients[i].s = INVALID_FD;
+			clients[i].s = NO_SOCKET;
 		}
 		else
 		{
@@ -2385,7 +2393,7 @@ int main(int argc, char *argv[])
 
 		mutex_unlock(&clients_mutex);
 
-		if(FD_OK(old_s) && (old_s > 0))
+		if(SOCKET_OK(old_s))
 		{
 			shutdown(old_s, SHUT_RDWR);
 			closesocket(old_s);
