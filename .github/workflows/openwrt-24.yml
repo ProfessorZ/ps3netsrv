@@ -1,10 +1,12 @@
 name: OpenWrt 24.10.5 Build
 
+# Manual-only. The OpenWrt targets are not used in this fork, and the job
+# container (ghcr.io/<owner>/openwrt-build-env) cannot even be pulled here:
+# github.repository_owner is "ProfessorZ" and Docker rejects uppercase
+# repository names, so every matrix job failed at "Initialize containers"
+# before checking out any code. Re-enable the push/pull_request triggers
+# once a lowercase image is published for this account.
 on:
-  push:
-    branches: [ "master", "main" ]
-  pull_request:
-    branches: [ "master", "main" ]
   workflow_dispatch:
 
 jobs:
