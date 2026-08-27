@@ -133,7 +133,14 @@ int File::open(const char *path, int flags)
 			strcpy(filepath, path);
 
 			file_stat_t st;
-			fstat_file(fd, &st); part_size = st.file_size; // all parts (except last) must be the same size of size of .iso.0
+			if (fstat_file(fd, &st) < 0)
+			{
+				free(filepath);
+				close_file(fd);
+				fd = INVALID_FD;
+				return FAILED;
+			}
+			part_size = st.file_size; // all parts (except last) must be the same size of size of .iso.0
 
 			is_multipart = 1; // count parts
 
@@ -483,7 +490,15 @@ int64_t File::seek(int64_t offset, int whence)
 	}
 
 	// seek multi part iso (2015 AV)
-	index = (int)(offset / part_size);
+	int64_t part_index = offset / part_size;
+	if ((part_index < 0) || (part_index >= is_multipart))
+	{
+		printf("ERROR: seek offset is out of range for this multi-part file (part %lld of %d).\n",
+			(long long int)part_index, is_multipart);
+		return FAILED;
+	}
+
+	index = (int8_t)part_index;
 
 	return seek_file(fp[index], (offset % part_size), whence);
 }
@@ -507,6 +522,25 @@ int File::fstat(file_stat_t *fs)
 
 	int ret = fstat_file(fd, fs); fs->file_size = size;
 	return ret;
+}
+
+bool File::supportsBulkRead() const
+{
+	// Multipart: read() only handles a span straddling a single part
+	// boundary; a big bulk read could cross more than one and silently
+	// short-read.
+	if (is_multipart)
+		return false;
+
+#ifndef NOSSL
+	// Encrypted (3k3y/Redump): read() decrypts an entire call's worth of
+	// data using one region's parameters; a big bulk read could straddle
+	// more than one encrypted/unencrypted region.
+	if (enc_type_ != kDiscTypeNone)
+		return false;
+#endif
+
+	return true;
 }
 
 #ifndef NOSSL

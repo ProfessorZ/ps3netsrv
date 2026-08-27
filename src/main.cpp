@@ -771,30 +771,71 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 	if ((!client->ro_file) || (!client->buf))
 		return FAILED;
 
-	uint64_t offset = BE32(cmd->start_sector)*(client->CD_SECTOR_SIZE);
+	uint64_t offset = (uint64_t)BE32(cmd->start_sector) * client->CD_SECTOR_SIZE;
 	uint32_t sector_count = BE32(cmd->sector_count);
 
 	DPRINTF("Read CD 2048 (%i) %x %x\n", client->CD_SECTOR_SIZE, BE32(cmd->start_sector), sector_count);
 
-	if((sector_count * 2048) > BUFFER_SIZE)
+	if(((uint64_t)sector_count * 2048) > BUFFER_SIZE)
 	{
 		// This is just to save some uneeded code. PS3 will never request such a high number of sectors
 		printf("ERROR: Too many sectors read!\n");
 		return FAILED;
 	}
 
-	uint8_t *buf = client->buf;
-	for (uint32_t i = 0; i < sector_count; i++)
+	// Fast path: for backends that can satisfy a large contiguous read in one
+	// call (plain files and virtual ISOs, but not multipart/encrypted -- see
+	// AbstractFile::supportsBulkRead), read the whole span covering every
+	// requested sector in a single syscall, then extract each 2048-byte
+	// payload in memory. This replaces the 2*sector_count seek+read syscalls
+	// of the per-sector loop with one seek + one read on the game-data
+	// streaming hot path. `scratch` stays NULL when the fast path doesn't
+	// apply (unsupported backend, sector_count 0, or OOM), selecting the
+	// per-sector fallback -- byte-identical to the original behavior.
+	uint8_t *scratch = NULL;
+	if ((sector_count > 0) && client->ro_file->supportsBulkRead())
 	{
-		client->ro_file->seek(offset + 24, SEEK_SET);
-		if(client->ro_file->read(buf, 2048) != 2048)
-		{
-			printf("ERROR: read_file failed on read cd 2048 critical command!\n");
-			return FAILED;
-		}
+		// Span from the start of the first sector's payload to the end of the
+		// last sector's payload (headers/gaps between them included).
+		size_t span = (size_t)(sector_count - 1) * client->CD_SECTOR_SIZE + 24 + 2048;
+		scratch = (uint8_t *)malloc(span);
 
-		buf += 2048;
-		offset += client->CD_SECTOR_SIZE; // skip subchannel data
+		if (scratch)
+		{
+			client->ro_file->seek(offset + 24, SEEK_SET);
+			if (client->ro_file->read(scratch, span) != (ssize_t)span)
+			{
+				free(scratch);
+				printf("ERROR: read_file failed on read cd 2048 critical command!\n");
+				return FAILED;
+			}
+
+			uint8_t *buf = client->buf;
+			for (uint32_t i = 0; i < sector_count; i++)
+			{
+				memcpy(buf, scratch + (size_t)i * client->CD_SECTOR_SIZE, 2048);
+				buf += 2048;
+			}
+
+			free(scratch);
+		}
+	}
+
+	if (!scratch)
+	{
+		uint8_t *buf = client->buf;
+		for (uint32_t i = 0; i < sector_count; i++)
+		{
+			client->ro_file->seek(offset + 24, SEEK_SET);
+			if(client->ro_file->read(buf, 2048) != 2048)
+			{
+				printf("ERROR: read_file failed on read cd 2048 critical command!\n");
+				return FAILED;
+			}
+
+			buf += 2048;
+			offset += client->CD_SECTOR_SIZE; // skip subchannel data
+		}
 	}
 
 	int send_ret = send(client->s, (char *)client->buf, sector_count * 2048, 0);
@@ -1387,12 +1428,28 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 	struct dirent *entry;
 	size_t d_name_len;
 
-	char path[MAX_PATH_LEN]; strcpy(path, dir_path);
+	// `path` is sized to path_len (as computed by the caller) rather than a fixed
+	// MAX_PATH_LEN stack buffer, since dir_path/path can legitimately exceed
+	// MAX_PATH_LEN (e.g. a long client-supplied OPEN_DIR path, or deep recursion).
+	char *path = (char *)malloc(path_len);
+	if(!path) return;
+
+	if((size_t)snprintf(path, path_len, "%s", dir_path) >= path_len)
+	{
+		free(path);
+		return;
+	}
 
 	normalize_path(path, true);
 	DIR *dir2 = opendir(path);
-	strcat(path, "/");
+
 	size_t dir2path_len = strlen(path);
+	if(dir2path_len + 1 < path_len)
+	{
+		path[dir2path_len] = '/';
+		path[dir2path_len + 1] = '\0';
+		dir2path_len++;
+	}
 
 	if(dir2)
 	{
@@ -1408,7 +1465,7 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 
 			if(dir2path_len + d_name_len >= path_len) continue;
 
-			sprintf(path + dir2path_len, "%s", entry->d_name);
+			snprintf(path + dir2path_len, path_len - dir2path_len, "%s", entry->d_name);
 
 			if(stat_file(path, &st) < 0)
 			{
@@ -1444,9 +1501,9 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 			dir_entries[items].mtime = BE64(st.mtime);
 
 			if(subdirs)
-				sprintf(dir_entries[items].name, "%s", path + dirpath_len);
+				snprintf(dir_entries[items].name, sizeof(dir_entries[items].name), "%s", path + dirpath_len);
 			else
-				sprintf(dir_entries[items].name, "%s", entry->d_name);
+				snprintf(dir_entries[items].name, sizeof(dir_entries[items].name), "%s", entry->d_name);
 
 			path[dir2path_len] = '\0';
 
@@ -1455,6 +1512,7 @@ static void process_read_dir(netiso_read_dir_result_data *dir_entries, const cha
 		}
 		closedir(dir2); dir2 = NULL;
 	}
+	free(path);
 	*nitems = items;
 }
 
@@ -2215,9 +2273,19 @@ int main(int argc, char *argv[])
 
 		if(i < MAX_CLIENTS)
 		{
-			// Shutdown socket and wait for thread to complete
-			shutdown(clients[i].s, SHUT_RDWR);
-			closesocket(clients[i].s);
+			// Shutdown socket and wait for thread to complete.
+			// Read the descriptor once and only act on a real one: the owning
+			// thread may be inside finalize_client(), which memsets the whole
+			// client_t and so can zero .s between the "connected" test above and
+			// this line. Closing the resulting 0 would close stdin, and once fd 0
+			// is free a later accept() can be handed it -- turning the next
+			// reconnection into a close of a live socket.
+			int old_s = clients[i].s;
+			if(old_s > 0)
+			{
+				shutdown(old_s, SHUT_RDWR);
+				closesocket(old_s);
+			}
 			join_thread(clients[i].thread);
 
 			if(strcmp(last_ip, conn_ip))
