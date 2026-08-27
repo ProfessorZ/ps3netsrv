@@ -1,0 +1,31 @@
+services:
+  ps3netsrv:
+    build:
+      context: .
+      args:
+        # Shown in the startup banner.
+        BUILD_DATE: "${BUILD_DATE:-unknown}"
+    image: ps3netsrv:latest
+    container_name: ps3netsrv
+    restart: unless-stopped
+
+    # ps3netsrv only ever needs to read the media it shares.
+    volumes:
+      - ./games:/games:ro
+
+    ports:
+      - "38008:38008/tcp"
+
+    environment:
+      PS3NETSRV_ROOT: /games
+      PS3NETSRV_PORT: "38008"
+      # Restrict which consoles may connect, e.g. "192.168.1.*".
+      # PS3NETSRV_WHITELIST: "192.168.1.*"
+
+    # Match this to the owner of ./games on the host. The image defaults to
+    # 1000:1000; set it explicitly if your media is owned by anyone else.
+    user: "1000:1000"
+
+    # The server never needs to gain privileges once it has bound its port.
+    security_opt:
+      - no-new-privileges:true

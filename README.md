@@ -91,10 +91,77 @@ sudo apt-get install g++
 ```
 
 ## Docker Container
-Docker Engine enables applications built in containers packages to run anywhere consistently on any infrastructure.
+This repository ships a `Dockerfile` that builds ps3netsrv from source and runs it
+as an unprivileged user. The image compiles with the *Alternate building method*
+(bundled POLARSSL), so no Meson or mbed TLS is required.
 
-Docker container packages for ps3netsrv are available at:
-https://hub.docker.com/search?q=ps3netsrv
+Build the image:
+
+```bash
+docker build --build-arg BUILD_DATE=$(date +%Y%m%d) -t ps3netsrv .
+```
+
+Run it, sharing a directory of games on the default port:
+
+```bash
+docker run -d --name ps3netsrv -p 38008:38008 -v /path/to/games:/games:ro ps3netsrv
+```
+
+Or with Docker Compose — put your media in `./games` (or edit the volume) and run:
+
+```bash
+BUILD_DATE=$(date +%Y%m%d) docker compose up -d
+```
+
+### Configuration
+
+The container is configured with environment variables, which map onto the
+`ps3netsrv [rootdirectory] [port] [whitelist]` command line:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PS3NETSRV_ROOT` | `/games` | Shared directory inside the container. Cannot be `/`. |
+| `PS3NETSRV_PORT` | `38008` | Listening port. Must be in the 1024-65535 range. |
+| `PS3NETSRV_WHITELIST` | *(unset)* | Restrict connections, e.g. `192.168.1.*`. |
+
+Any arguments passed after the image name are handed straight to `ps3netsrv`
+instead, so the variables stay a convenience rather than a restriction:
+
+```bash
+docker run --rm -v /path/to/games:/games:ro ps3netsrv /games 38008 '192.168.1.*'
+```
+
+### File permissions
+
+The image runs as uid/gid `1000:1000`. If your media is owned by a different
+user, override it so the server can read the share:
+
+```bash
+docker run -d --user $(id -u):$(id -g) -p 38008:38008 -v /path/to/games:/games:ro ps3netsrv
+```
+
+The equivalent in Compose is the `user:` key, which is already present in
+`docker-compose.yml`.
+
+### Notes
+
+* The share is mounted read-only in the examples above. Mount it read-write if
+  you want to use the remote file operations (create, delete, mkdir, rmdir).
+* ps3netsrv writes its log to stdout, so use `docker logs -f ps3netsrv` to
+  follow it. The entrypoint runs the server through `stdbuf` to keep that
+  output line-buffered; without it the logs would stall behind a full pipe
+  buffer.
+* Don't pass `-i` (or set `stdin_open: true`). ps3netsrv ends its error paths
+  with a "Press ENTER to continue..." prompt, which exits immediately when
+  stdin is closed but would hang forever with stdin attached.
+* The image uses `tini` as its init so `docker stop` shuts the server down
+  promptly, and the entrypoint ignores `SIGPIPE` so a console that disconnects
+  mid-transfer cannot take the server down with it.
+* Compose maps `./games` into the container. The directory is in the repository
+  already; make sure its contents are readable by the `user:` in
+  `docker-compose.yml`.
+* Third-party ps3netsrv images are also published on Docker Hub:
+  https://hub.docker.com/search?q=ps3netsrv
 
 # Other ports / forks
 The ps3netsrv has been ported to multiple platforms (Windows, linux, FreeBSD, MacOS, PS3, Android, Java)<br>

@@ -1,0 +1,26 @@
+# Everything not needed to compile ps3netsrv
+.git
+.github
+.gitignore
+.claude
+build*
+logs
+openwrt
+*.md
+LICENSE.TXT
+
+# Build outputs that must never leak into the builder stage and shadow a fresh build
+*.o
+src/*.o
+ps3netsrv
+ps3netsrv.exe
+makeiso
+makeiso.exe
+
+# Docker's own files (docker/ is kept: it holds the entrypoint)
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Compose default share; never part of the build context
+games
