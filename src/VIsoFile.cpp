@@ -620,10 +620,12 @@ uint8_t *VIsoFile::buildPathTable(bool msb, bool joliet, size_t *retSize)
 	dirList = rootList;
 	while ((dirList) && (i < 65536))
 	{
-		// Worst-case entry size (8-byte header + MAX_ISODIR name bytes + odd-length pad byte) must
-		// still fit before we write anything at `p`, since len_di isn't known until after the
-		// strncpy_upper/utf8_to_ucs2 call below, which itself writes directly into the buffer.
-		if ((p + 8 + MAX_ISODIR + 1) >= (tempBuf + tempBufSize))
+		// Worst-case entry footprint must still fit before we write anything at `p`, since
+		// len_di isn't known until after the strncpy_upper/utf8_to_ucs2 call below, which
+		// itself writes directly into the buffer. That worst case is exactly 8 + MAX_ISODIR:
+		// len_di maxes out at MAX_ISODIR (even), and the odd-length pad byte only applies to
+		// a shorter name, so neither the write extent nor the advance can exceed it.
+		if ((p + 8 + MAX_ISODIR) > (tempBuf + tempBufSize))
 		{
 			return NULL;
 		}

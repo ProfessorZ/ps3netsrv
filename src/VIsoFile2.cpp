@@ -562,15 +562,15 @@ void VIsoFile::reset(void)
 
 void VIsoFile::fd_reset(void)
 {
-	// 0 is this class's "no cached file" sentinel (see the constructor), not a
-	// real descriptor -- closing it unguarded would close stdin on POSIX, and
-	// makes reset() unsafe to call more than once.
-	if (fd)
-	{
+	// Only close a real descriptor. 0 is this class's "no cached file" sentinel
+	// (see the constructor) and is a valid fd number on POSIX, so FD_OK() alone
+	// would not exclude it -- closing it would close stdin. A failed
+	// open_file() also leaves INVALID_FD here. State is reset either way, which
+	// keeps this idempotent.
+	if (fd && FD_OK(fd))
 		close_file(fd);
-		fd = 0;
-	}
 
+	fd = 0;
 	lastPath = NULL;
 }
 
@@ -642,10 +642,12 @@ uint8_t *VIsoFile::buildPathTable(bool msb, bool joliet, size_t *retSize)
 	dirList = rootList;
 	while ((dirList) && (i < 65536))
 	{
-		// Worst-case entry size (8-byte header + MAX_ISODIR name bytes + odd-length pad byte) must
-		// still fit before we write anything at `p`, since len_di isn't known until after the
-		// strncpy_upper/utf8_to_ucs2 call below, which itself writes directly into the buffer.
-		if ((p + 8 + MAX_ISODIR + 1) >= (tempBuf + tempBufSize))
+		// Worst-case entry footprint must still fit before we write anything at `p`, since
+		// len_di isn't known until after the strncpy_upper/utf8_to_ucs2 call below, which
+		// itself writes directly into the buffer. That worst case is exactly 8 + MAX_ISODIR:
+		// len_di maxes out at MAX_ISODIR (even), and the odd-length pad byte only applies to
+		// a shorter name, so neither the write extent nor the advance can exceed it.
+		if ((p + 8 + MAX_ISODIR) > (tempBuf + tempBufSize))
 		{
 			return NULL;
 		}
@@ -1670,7 +1672,11 @@ ssize_t VIsoFile::read(void *buf, size_t nbyte)
 					{
 						if(lastPath != fileList->path)
 						{
-							close_file(fd);
+							// Defensive: route through fd_reset() so the cached
+							// descriptor is only closed when it is a real one.
+							// Equivalent to close_file(fd) for a live fd, but
+							// will not act on the 0 sentinel or INVALID_FD.
+							fd_reset();
 							lastPath = fileList->path;
 
 							fd = open_file(fileList->path, O_RDONLY);
