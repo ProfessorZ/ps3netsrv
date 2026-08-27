@@ -10,6 +10,7 @@
 
 #ifndef WIN32
 #include <ifaddrs.h>
+#include <signal.h>
 #endif
 
 static const int FAILED		= -1;
@@ -1808,6 +1809,20 @@ int main(int argc, char *argv[])
 	uint16_t port = NETISO_PORT;
 	uint32_t whitelist_start = 0;
 	uint32_t whitelist_end   = 0;
+#endif
+
+	// stdio block-buffers when stdout is not a terminal, so anything reading
+	// the log through a pipe -- a service manager, a container runtime, tee --
+	// sees nothing until 4KB has accumulated. Line buffering keeps the log
+	// usable without changing how it looks on a terminal.
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
+#ifndef WIN32
+	// The send() calls below pass no MSG_NOSIGNAL, so a client that disappears
+	// mid-transfer would raise SIGPIPE and terminate the whole server, taking
+	// the other connected clients with it. Ignoring it makes those calls return
+	// -1/EPIPE instead, which the existing return-value checks already handle.
+	signal(SIGPIPE, SIG_IGN);
 #endif
 
 	get_normal_color();
