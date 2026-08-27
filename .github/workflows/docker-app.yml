@@ -28,7 +28,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ps3netsrv
 
 jobs:
   # Pull requests only prove the image still builds. Kept as a separate job so
@@ -86,11 +85,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # GHCR rejects uppercase repository names, so the owner cannot be
+      # interpolated as-is: on a fork whose owner has capitals the push fails
+      # with "repository name must be lowercase". Lowercasing here keeps the
+      # workflow correct for any fork without hardcoding an owner.
+      - name: Compute image name
+        id: img
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=${{ env.REGISTRY }}/$owner/ps3netsrv" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.img.outputs.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long

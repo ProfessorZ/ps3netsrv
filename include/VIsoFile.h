@@ -34,7 +34,12 @@ typedef struct _DirList
 	size_t contentJolietSize;
 	int idx;
 	FileList *fileList;
-	struct _DirList *next;
+	struct _DirList *next;         // flat BFS list of every directory
+	// Explicit tree links, populated as the flat list is built, so parent and
+	// direct-children lookups are O(1) instead of O(n) string scans.
+	struct _DirList *parent;       // rootList's parent is itself (see getParent)
+	struct _DirList *firstChild;
+	struct _DirList *nextSibling;
 } DirList;
 
 typedef struct
@@ -100,7 +105,6 @@ private:
 	void fd_reset(void);
 
 	DirList *getParent(DirList *dirList);
-	bool isDirectChild(DirList *dir, DirList *parentCheck);
 	Iso9660DirectoryRecord *findDirRecord(const char *dirName, Iso9660DirectoryRecord *parentRecord, size_t size, bool joliet);
 
 	uint8_t *buildPathTable(bool msb, bool joliet, size_t *retSize);

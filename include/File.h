@@ -93,6 +93,7 @@ class File : public AbstractFile
 	virtual ssize_t write(void *buf, size_t nbyte);
 	virtual int64_t seek(int64_t offset, int whence);
 	virtual int fstat(file_stat_t *fs);
+	virtual bool supportsBulkRead() const;
 
 #ifndef NOSSL
 	/////////////////////////////////////////////////

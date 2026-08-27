@@ -5,6 +5,7 @@
 .claude
 build*
 logs
+tests
 *.md
 LICENSE.TXT
 

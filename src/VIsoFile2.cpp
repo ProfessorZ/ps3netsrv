@@ -562,7 +562,13 @@ void VIsoFile::reset(void)
 
 void VIsoFile::fd_reset(void)
 {
-	close_file(fd);
+	// Only close a real descriptor. 0 is this class's "no cached file" sentinel
+	// (see the constructor) and is a valid fd number on POSIX, so FD_OK() alone
+	// would not exclude it -- closing it would close stdin. A failed
+	// open_file() also leaves INVALID_FD here. State is reset either way, which
+	// keeps this idempotent.
+	if (fd && FD_OK(fd))
+		close_file(fd);
 
 	fd = 0;
 	lastPath = NULL;
@@ -570,50 +576,8 @@ void VIsoFile::fd_reset(void)
 
 DirList *VIsoFile::getParent(DirList *dirList)
 {
-	if(!dirList)
-		return dirList;
-
-	if (dirList == rootList)
-		return dirList;
-
-	DirList *tempList = rootList;
-
-	char *parentPath;
-	parentPath = dupString(dirList->path, dirList->full_len); if(!parentPath) return dirList;
-
-	char *slash = strrchr(parentPath + dirList->path_len, '/'); if(slash) *slash = 0;
-
-	while (tempList)
-	{
-		if (strcmp(parentPath, tempList->path) == SUCCEEDED)
-		{
-			delete[] parentPath;
-			return tempList;
-		}
-
-		tempList = tempList->next;
-	}
-
-	delete[] parentPath;
-	return dirList;
-}
-
-bool VIsoFile::isDirectChild(DirList *dir, DirList *parentCheck)
-{
-	if ((!dir) || (!parentCheck)) return false;
-
-	if (strcmp(dir->path, parentCheck->path) == SUCCEEDED)
-		return false;
-
-	char *p = strstr(dir->path, parentCheck->path);
-	if (p != dir->path)
-		return false;
-
-	p += parentCheck->full_len + 1;
-	if (strchr(p, '/'))
-		return false;
-
-	return true;
+	// parent links are populated in build(); rootList points to itself.
+	return dirList ? dirList->parent : NULL;
 }
 
 Iso9660DirectoryRecord *VIsoFile::findDirRecord(const char *dirName, Iso9660DirectoryRecord *parentRecord, size_t size, bool joliet)
@@ -678,6 +642,16 @@ uint8_t *VIsoFile::buildPathTable(bool msb, bool joliet, size_t *retSize)
 	dirList = rootList;
 	while ((dirList) && (i < 65536))
 	{
+		// Worst-case entry footprint must still fit before we write anything at `p`, since
+		// len_di isn't known until after the strncpy_upper/utf8_to_ucs2 call below, which
+		// itself writes directly into the buffer. That worst case is exactly 8 + MAX_ISODIR:
+		// len_di maxes out at MAX_ISODIR (even), and the odd-length pad byte only applies to
+		// a shorter name, so neither the write extent nor the advance can exceed it.
+		if ((p + 8 + MAX_ISODIR) > (tempBuf + tempBufSize))
+		{
+			return NULL;
+		}
+
 		Iso9660PathTable *table = (Iso9660PathTable *)p;
 		Iso9660DirectoryRecord *record;
 		uint16_t parentIdx;
@@ -921,10 +895,11 @@ bool VIsoFile::buildContent(DirList *dirList, bool joliet)
 		fileList = fileList->next;
 	}
 
-	tempList = dirList->next;
+	// firstChild/nextSibling form dirList's direct-children list by
+	// construction (see build()), so no per-node parent check is needed.
+	tempList = dirList->firstChild;
 	while (tempList)
 	{
-		if (isDirectChild(tempList, dirList))
 		{
 			uint32_t offs;
 			record = (Iso9660DirectoryRecord *)malloc(SECTOR_SIZE);
@@ -978,7 +953,7 @@ bool VIsoFile::buildContent(DirList *dirList, bool joliet)
 			free(record);
 		}
 
-		tempList = tempList->next;
+		tempList = tempList->nextSibling;
 	}
 
 	size_t size = (p - tempBuf);
@@ -1138,6 +1113,9 @@ bool VIsoFile::build(const char *inDir)
 	rootList->fileList = NULL;
 	rootList->idx = idx++;
 	rootList->next = NULL;
+	rootList->parent = rootList; // root is its own parent (matches getParent)
+	rootList->firstChild = NULL;
+	rootList->nextSibling = NULL;
 	dirList = tail = rootList;
 
 	while (dirList)
@@ -1147,6 +1125,9 @@ bool VIsoFile::build(const char *inDir)
 			return false;
 
 		dlen = dirList->full_len;
+		// dirList's children are appended consecutively here, so build its
+		// sibling chain as we go -- that chain is exactly its direct children.
+		DirList *lastChild = NULL;
 		for (int i = 0; i < count; i++)
 		{
 			if (!error)
@@ -1157,6 +1138,9 @@ bool VIsoFile::build(const char *inDir)
 				flen = strlen(dirs[i]->d_name);
 				#endif
 				tail = tail->next = new DirList;
+				tail->parent = dirList;
+				tail->firstChild = NULL;
+				tail->nextSibling = NULL;
 				tail->path = createPath(dlen, dirList->path, flen, dirs[i]->d_name);
 				if(tail->path)
 				{
@@ -1167,6 +1151,12 @@ bool VIsoFile::build(const char *inDir)
 					tail->idx = idx++;
 					tail->fileList = NULL;
 					tail->next = NULL;
+
+					if (lastChild)
+						lastChild->nextSibling = tail;
+					else
+						dirList->firstChild = tail;
+					lastChild = tail;
 				}
 				else
 					error = true;
@@ -1292,6 +1282,15 @@ bool VIsoFile::build(const char *inDir)
 	pathTableM = buildPathTable(true, false, &pathTableSize);
 	pathTableJolietL = buildPathTable(false, true, &pathTableSizeJoliet);
 	pathTableJolietM = buildPathTable(true, true, &pathTableSizeJoliet);
+
+	if ((!pathTableL) || (!pathTableM) || (!pathTableJolietL) || (!pathTableJolietM))
+	{
+		// Free the directory tree and any path tables already built; otherwise a
+		// caller that reuses this object for another open() would leak them
+		// (open() only calls close() when fsBuf is set, which it isn't yet here).
+		reset();
+		return false;
+	}
 
 	uint32_t isoLba = (0xA000 / SECTOR_SIZE) + (bytesToSectors(pathTableSize) * 2) + (bytesToSectors(pathTableSizeJoliet) * 2);
 	uint32_t jolietLba = isoLba + dirsSizeSectors;
@@ -1673,7 +1672,11 @@ ssize_t VIsoFile::read(void *buf, size_t nbyte)
 					{
 						if(lastPath != fileList->path)
 						{
-							close_file(fd);
+							// Defensive: route through fd_reset() so the cached
+							// descriptor is only closed when it is a real one.
+							// Equivalent to close_file(fd) for a live fd, but
+							// will not act on the 0 sentinel or INVALID_FD.
+							fd_reset();
 							lastPath = fileList->path;
 
 							fd = open_file(fileList->path, O_RDONLY);
