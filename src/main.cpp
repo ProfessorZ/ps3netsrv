@@ -2273,9 +2273,19 @@ int main(int argc, char *argv[])
 
 		if(i < MAX_CLIENTS)
 		{
-			// Shutdown socket and wait for thread to complete
-			shutdown(clients[i].s, SHUT_RDWR);
-			closesocket(clients[i].s);
+			// Shutdown socket and wait for thread to complete.
+			// Read the descriptor once and only act on a real one: the owning
+			// thread may be inside finalize_client(), which memsets the whole
+			// client_t and so can zero .s between the "connected" test above and
+			// this line. Closing the resulting 0 would close stdin, and once fd 0
+			// is free a later accept() can be handed it -- turning the next
+			// reconnection into a close of a live socket.
+			int old_s = clients[i].s;
+			if(old_s > 0)
+			{
+				shutdown(old_s, SHUT_RDWR);
+				closesocket(old_s);
+			}
 			join_thread(clients[i].thread);
 
 			if(strcmp(last_ip, conn_ip))
