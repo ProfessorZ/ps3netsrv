@@ -161,6 +161,41 @@ The equivalent in Compose is the `user:` key, which is already present in
 * Third-party ps3netsrv images are also published on Docker Hub:
   https://hub.docker.com/search?q=ps3netsrv
 
+## Troubleshooting stuttering playback
+
+netiso is strictly request/response: the console sends a read command and
+blocks until the whole reply arrives. Anything that adds latency per request,
+or that breaks the connection, is felt directly as stutter in game.
+
+**First, look at the log while the game stutters.** It names the cause more
+often than not:
+
+```bash
+docker logs --since 5m ps3netsrv
+```
+
+| What you see | What it means |
+| --- | --- |
+| `NOTE: read past end of image ...` | The console read past the end of the image and the overhang was zero-filled. Normal at the tail of an image, and logged once per opened file. If it appears at an offset well short of the image size, the server is serving zeros for data it cannot see -- most likely a multi-part set with a part missing. |
+| `ERROR: read_file failed on read file critical command!` | A read failed and the connection was dropped, so the console must reconnect and reopen. Reads that merely overhang the end of an image no longer land here, so this now points at the storage under the share. |
+| Repeated `Connection from` / `Reconnection from` | The connection is being torn down and re-established mid-play. The server also drops an existing client when a second connection arrives from the same IP. |
+| Nothing at all during a stutter | The server is not the bottleneck. Look at the storage holding the ISO, or at the console's link. |
+
+**Then measure the storage cold**, bypassing the page cache -- a server that
+looks instant on a warm re-read can still be starving the console:
+
+```bash
+docker exec ps3netsrv dd if=/games/PS3ISO/YourGame.iso of=/dev/null bs=1M count=2000 skip=4000 iflag=direct
+```
+
+A PS3 Blu-ray drive tops out around 9 MB/s, so anything comfortably above that
+rules the disk out. USB 2.0 enclosures, sleeping spinning disks, and SMB/NFS
+mounts are the usual offenders.
+
+**Check the console's link.** The PS3's built-in WiFi is 802.11g only, and its
+latency jitter alone is enough to stutter a Blu-ray stream. Wired is strongly
+preferred; a powerline or MoCA "wired" run behaves like wireless.
+
 # Other ports / forks
 The ps3netsrv has been ported to multiple platforms (Windows, linux, FreeBSD, MacOS, PS3, Android, Java)<br>
 
