@@ -801,7 +801,13 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 			// only answer that keeps both ends aligned. Failing here instead
 			// tears the connection down mid-stream and forces the console to
 			// reconnect and reopen, which is felt as a stall during playback.
-			if((client->ro_file_size == 0) || ((pos + (uint64_t)read_ret) < client->ro_file_size))
+			//
+			// ro_file_size is always trustworthy here: process_open_cmd nulls
+			// ro_file when either open() or fstat() fails, and this function
+			// refuses a NULL ro_file, so a recorded size of 0 means an empty
+			// file rather than an unknown one. Empty files therefore pad like
+			// any other read that starts at the end.
+			if((pos + (uint64_t)read_ret) < client->ro_file_size)
 			{
 				// Short of the end of the file: a real I/O error, still fatal.
 				printf("ERROR: read_file failed on read file critical command!\n");
@@ -869,7 +875,7 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 			// short of the requested span, and this command has no length field
 			// either, so pad rather than drop the connection.
 			if ((bulk_ret >= 0) && ((size_t)bulk_ret < span) &&
-			    (client->ro_file_size > 0) && ((offset + 24 + (uint64_t)bulk_ret) >= client->ro_file_size))
+			    ((offset + 24 + (uint64_t)bulk_ret) >= client->ro_file_size))
 			{
 				log_eof_padding(client, offset + 24 + (uint64_t)bulk_ret);
 				memset(scratch + bulk_ret, 0, span - (size_t)bulk_ret);
@@ -903,7 +909,7 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 			ssize_t sec_ret = client->ro_file->read(buf, 2048);
 
 			if ((sec_ret >= 0) && (sec_ret < 2048) &&
-			    (client->ro_file_size > 0) && ((offset + 24 + (uint64_t)sec_ret) >= client->ro_file_size))
+			    ((offset + 24 + (uint64_t)sec_ret) >= client->ro_file_size))
 			{
 				log_eof_padding(client, offset + 24 + (uint64_t)sec_ret);
 				memset(buf + sec_ret, 0, 2048 - (size_t)sec_ret);

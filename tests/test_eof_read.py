@@ -187,3 +187,35 @@ def test_multipart_short_read_mid_file_is_still_fatal(server):
         sock.close()
 
     server.assert_alive()
+
+
+def test_zero_length_file_is_zero_filled(server):
+    """An empty file is entirely past its own end, so reads of it must pad.
+
+    process_open_cmd nulls ro_file when either open() or fstat() fails, and
+    both read handlers refuse a NULL ro_file, so a recorded size of 0 can only
+    mean a genuinely empty file -- never "size unknown". Treating 0 as unknown
+    would make empty files the one case that still drops the connection.
+    """
+    # Arrange
+    open(os.path.join(server.root, "empty.iso"), "wb").close()
+    req = 4 * SECTOR
+
+    sock = connect(server.port)
+    try:
+        sock.sendall(open_file_cmd(b"/empty.iso"))
+        header = recv_exact(sock, 16)
+        assert len(header) == 16
+        (file_size, _mtime) = struct.unpack(">qQ", header)
+        assert file_size == 0
+
+        # Act
+        sock.sendall(read_file_critical_cmd(req, 0))
+        got = recv_exact(sock, req)
+
+        # Assert
+        assert got == bytes(req), "empty file should pad, not drop the connection"
+    finally:
+        sock.close()
+
+    server.assert_alive()
