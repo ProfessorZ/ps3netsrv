@@ -2436,6 +2436,16 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
+		// netiso is strictly request/response: the console sends a command and
+		// blocks until the entire reply has arrived. Nagle can hold back the
+		// trailing partial segment of a reply until the console ACKs earlier
+		// data, and the console has nothing to piggyback that ACK on because it
+		// is still waiting for that very segment -- a delayed-ACK timeout per
+		// request in the worst case. Best effort: a kernel refusing it is
+		// harmless.
+		int nodelay = 1;
+		setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+
 		clients[i].s = cs;
 		clients[i].ip_addr = addr.sin_addr;
 		create_start_thread(&clients[i].thread, client_thread, &clients[i]);
