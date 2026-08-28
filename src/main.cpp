@@ -58,9 +58,28 @@ typedef struct _client_t
 	int connected;
 	struct in_addr ip_addr;
 	thread_t thread;
+	int has_thread; // `thread` holds a started thread that still needs joining
 	uint16_t CD_SECTOR_SIZE;
 	int subdirs;
 } client_t;
+
+// Sentinel for client_t.s, which is a plain int socket -- not a file_t. The
+// INVALID_FD / FD_OK macros describe files, and file_t is a HANDLE on Win32,
+// so they must not be used on sockets. A slot holding no socket is set to
+// NO_SOCKET rather than left at the 0 that memset() produces: 0 is a perfectly
+// valid descriptor, so a server started with stdin closed can be handed fd 0
+// by accept(), and treating that as "no socket" would leak the connection.
+#define NO_SOCKET (-1)
+#define SOCKET_OK(sock) ((sock) >= 0)
+
+// Guards the slot bookkeeping in clients[]. Of those fields, .connected and .s
+// are the ones both the accept loop and the owning client thread touch, so
+// they are what strictly need the lock; .thread and .has_thread are written
+// only by the accept loop and are kept inside the same critical sections so a
+// slot's ownership state is published as a unit.
+// Declared outside the MAKEISO guard because finalize_client() uses it to hand
+// off socket ownership, and that function is also used by create_iso().
+static mutex_t clients_mutex;
 
 int make_iso = VISO_NONE;
 
@@ -182,6 +201,10 @@ static int initialize_client(client_t *client)
 {
 	memset(client, 0, sizeof(client_t));
 
+	// memset leaves .s at 0, which is a usable descriptor rather than "none";
+	// the caller assigns the real socket once it has one.
+	client->s = NO_SOCKET;
+
 	client->buf = (uint8_t *)malloc(BUFFER_SIZE);
 	if(!client->buf)
 	{
@@ -202,8 +225,20 @@ static int initialize_client(client_t *client)
 
 static void finalize_client(client_t *client)
 {
-	shutdown(client->s, SHUT_RDWR);
-	closesocket(client->s);
+	// Take ownership of the socket under the lock. The accept loop does the
+	// same when it forcibly reclaims a slot, so exactly one of us sees a real
+	// descriptor and closes it -- never both, and never a descriptor number
+	// that has already been recycled onto another connection.
+	mutex_lock(&clients_mutex);
+	int s = client->s;
+	client->s = NO_SOCKET;
+	mutex_unlock(&clients_mutex);
+
+	if(SOCKET_OK(s))
+	{
+		shutdown(s, SHUT_RDWR);
+		closesocket(s);
+	}
 
 	if(client->ro_file)
 	{
@@ -236,11 +271,16 @@ static void finalize_client(client_t *client)
 	client->wo_file = NULL;
 	client->dir = NULL;
 	client->dirpath = NULL;
-	client->connected = 0;
+	client->buf = NULL;
 	client->CD_SECTOR_SIZE = 2352;
 	client->subdirs = 0;
 
-	memset(client, 0, sizeof(client_t));
+	// Deliberately no memset(client, 0, sizeof(client_t)) here. This runs on
+	// the client's own thread, and the accept loop may already have handed
+	// this slot to a new connection -- zeroing it would wipe that client's
+	// freshly allocated buffer and socket. Releasing the slot is the accept
+	// loop's job (via .connected), and it only reuses a slot after joining
+	// the previous owner's thread.
 }
 
 static int create_iso(char *folder_path, char *fileout, int viso)
@@ -1852,6 +1892,13 @@ void *client_thread(void *arg)
 	}
 
 	finalize_client(client);
+
+	// Release the slot as the very last action, so the accept loop never sees
+	// it free while this thread is still touching it.
+	mutex_lock(&clients_mutex);
+	client->connected = 0;
+	mutex_unlock(&clients_mutex);
+
 	return NULL;
 }
 #endif //#ifndef MAKEISO
@@ -1882,6 +1929,14 @@ int main(int argc, char *argv[])
 	// -1/EPIPE instead, which the existing return-value checks already handle.
 	signal(SIGPIPE, SIG_IGN);
 #endif
+
+	// Must precede any finalize_client() call, including the create_iso() path
+	// below, since that hands off socket ownership under this lock.
+	if(mutex_init(&clients_mutex) != SUCCEEDED)
+	{
+		printf("ERROR: could not initialize the client mutex.\n");
+		return FAILED;
+	}
 
 	get_normal_color();
 
@@ -2277,6 +2332,19 @@ int main(int argc, char *argv[])
 			break;
 		}
 
+		int reconnection;
+		int old_s = NO_SOCKET;
+		int join_old;
+		thread_t old_thread;
+
+		sprintf(conn_ip, "%s", inet_ntoa(addr.sin_addr));
+
+		// Pick and reserve a slot under the lock. This is the only place in
+		// the loop that reads or writes slot state, and it covers the two
+		// fields a client thread can change underneath us (.connected, .s)
+		// along with the accept-loop-owned .thread / .has_thread.
+		mutex_lock(&clients_mutex);
+
 		// Check for same client
 		for (i = 0; i < MAX_CLIENTS; i++)
 		{
@@ -2284,29 +2352,14 @@ int main(int argc, char *argv[])
 				break;
 		}
 
-		sprintf(conn_ip, "%s", inet_ntoa(addr.sin_addr));
+		reconnection = (i < MAX_CLIENTS);
 
-		if(i < MAX_CLIENTS)
+		if(reconnection)
 		{
-			// Shutdown socket and wait for thread to complete.
-			// Read the descriptor once and only act on a real one: the owning
-			// thread may be inside finalize_client(), which memsets the whole
-			// client_t and so can zero .s between the "connected" test above and
-			// this line. Closing the resulting 0 would close stdin, and once fd 0
-			// is free a later accept() can be handed it -- turning the next
-			// reconnection into a close of a live socket.
-			int old_s = clients[i].s;
-			if(old_s > 0)
-			{
-				shutdown(old_s, SHUT_RDWR);
-				closesocket(old_s);
-			}
-			join_thread(clients[i].thread);
-
-			if(strcmp(last_ip, conn_ip))
-			{
-				printf("[%i] Reconnection from %s\n",  i, conn_ip);
-			}
+			// Take the socket from the slot so its thread's finalize_client()
+			// cannot also close it -- exactly one side gets a real descriptor.
+			old_s = clients[i].s;
+			clients[i].s = NO_SOCKET;
 		}
 		else
 		{
@@ -2317,6 +2370,7 @@ int main(int argc, char *argv[])
 
 				if ((ip < whitelist_start) || (ip > whitelist_end))
 				{
+					mutex_unlock(&clients_mutex);
 					printf("Rejected connection from %s (not in whitelist)\n", conn_ip);
 					closesocket(cs);
 					continue;
@@ -2332,17 +2386,40 @@ int main(int argc, char *argv[])
 
 			if(i >= MAX_CLIENTS)
 			{
-				printf("Too many connections! (rejected client: %s)\n", inet_ntoa(addr.sin_addr));
+				mutex_unlock(&clients_mutex);
+				printf("Too many connections! (rejected client: %s)\n", conn_ip);
 				closesocket(cs);
 				continue;
 			}
+		}
 
-			// Show only new connections
-			if(strcmp(last_ip, conn_ip))
-			{
-				printf("[%i] Connection from %s\n", i, conn_ip);
-				sprintf(last_ip, "%s", conn_ip);
-			}
+		// Reserve the slot before dropping the lock so no later iteration can
+		// hand it out while we are still tearing the previous owner down.
+		clients[i].connected = 1;
+		join_old = clients[i].has_thread;
+		old_thread = clients[i].thread;
+		clients[i].has_thread = 0;
+
+		mutex_unlock(&clients_mutex);
+
+		if(SOCKET_OK(old_s))
+		{
+			shutdown(old_s, SHUT_RDWR);
+			closesocket(old_s);
+		}
+
+		// Joined outside the lock: the exiting thread needs it to release the
+		// slot, so holding it here would deadlock. On return the previous
+		// owner has finished touching this slot, which is what makes the
+		// initialize_client() below safe. This also reclaims every thread --
+		// previously only the same-IP path joined, leaking the rest.
+		if(join_old)
+			join_thread(old_thread);
+
+		if(strcmp(last_ip, conn_ip))
+		{
+			printf("[%i] %s from %s\n", i, reconnection ? "Reconnection" : "Connection", conn_ip);
+			if(!reconnection) sprintf(last_ip, "%s", conn_ip);
 		}
 
 		/////////////////////////
@@ -2351,12 +2428,32 @@ int main(int argc, char *argv[])
 		if(initialize_client(&clients[i]) != SUCCEEDED)
 		{
 			printf("System seems low in resources.\n");
+
+			mutex_lock(&clients_mutex);
+			clients[i].connected = 0;
+			mutex_unlock(&clients_mutex);
+
+			closesocket(cs);
 			continue;
 		}
 
 		clients[i].s = cs;
 		clients[i].ip_addr = addr.sin_addr;
-		create_start_thread(&clients[i].thread, client_thread, &clients[i]);
+
+		if(create_start_thread(&clients[i].thread, client_thread, &clients[i]) == SUCCEEDED)
+		{
+			clients[i].has_thread = 1;
+		}
+		else
+		{
+			printf("ERROR: could not create client thread for %s\n", conn_ip);
+
+			finalize_client(&clients[i]);
+
+			mutex_lock(&clients_mutex);
+			clients[i].connected = 0;
+			mutex_unlock(&clients_mutex);
+		}
 	}
 
 #ifdef WIN32
