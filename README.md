@@ -181,16 +181,27 @@ docker logs --since 5m ps3netsrv
 | Repeated `Connection from` / `Reconnection from` | The connection is being torn down and re-established mid-play. The server also drops an existing client when a second connection arrives from the same IP. |
 | Nothing at all during a stutter | The server is not the bottleneck. Look at the storage holding the ISO, or at the console's link. |
 
-**Then measure the storage cold**, bypassing the page cache -- a server that
-looks instant on a warm re-read can still be starving the console:
+**Then measure the storage the way the console reads it.** `tools/ps3netsrv-probe.py`
+speaks the netiso protocol against a running server and times a sequential pass
+and a random-offset pass over a real image:
 
 ```bash
-docker exec ps3netsrv dd if=/games/PS3ISO/YourGame.iso of=/dev/null bs=1M count=2000 skip=4000 iflag=direct
+python3 tools/ps3netsrv-probe.py 127.0.0.1 38008 "/PS3ISO/YourGame.iso"
 ```
 
-A PS3 Blu-ray drive tops out around 9 MB/s, so anything comfortably above that
-rules the disk out. USB 2.0 enclosures, sleeping spinning disks, and SMB/NFS
-mounts are the usual offenders.
+The gap between the two passes is the whole point, so do not substitute a
+sequential `dd`. The server reads and sends serially, with no readahead and no
+pipelining, so every request pays the storage's full access latency before a
+single byte reaches the console. A spinning disk streams sequentially at well
+over 100 MB/s while delivering under 8 MB/s once the reads stop being
+sequential -- and game data access is not sequential. A sequential benchmark
+therefore gives a confident all-clear on exactly the disk that is starving the
+console.
+
+A PS3 Blu-ray drive tops out around 9 MB/s. If the random pass is below that,
+the storage is the bottleneck: move that image to an SSD, or keep it in page
+cache if it is small enough to fit in RAM. Spinning disks, USB 2.0 enclosures,
+and SMB/NFS mounts are the usual offenders.
 
 **Check the console's link.** The PS3's built-in WiFi is 802.11g only, and its
 latency jitter alone is enough to stutter a Blu-ray stream. Wired is strongly
