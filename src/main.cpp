@@ -65,14 +65,18 @@ typedef struct _client_t
 
 // Sentinel for client_t.s, which is a plain int socket -- not a file_t. The
 // INVALID_FD / FD_OK macros describe files, and file_t is a HANDLE on Win32,
-// so they must not be used on sockets. Sockets here are already tested with
-// "< 0" (see the accept() result); "> 0" additionally excludes 0, which is
-// stdin rather than any socket this server owns.
+// so they must not be used on sockets. A slot holding no socket is set to
+// NO_SOCKET rather than left at the 0 that memset() produces: 0 is a perfectly
+// valid descriptor, so a server started with stdin closed can be handed fd 0
+// by accept(), and treating that as "no socket" would leak the connection.
 #define NO_SOCKET (-1)
-#define SOCKET_OK(sock) ((sock) > 0)
+#define SOCKET_OK(sock) ((sock) >= 0)
 
-// Guards the slot bookkeeping in clients[] -- .connected, .s, .thread and
-// .has_thread -- which the accept loop and each client thread both touch.
+// Guards the slot bookkeeping in clients[]. Of those fields, .connected and .s
+// are the ones both the accept loop and the owning client thread touch, so
+// they are what strictly need the lock; .thread and .has_thread are written
+// only by the accept loop and are kept inside the same critical sections so a
+// slot's ownership state is published as a unit.
 // Declared outside the MAKEISO guard because finalize_client() uses it to hand
 // off socket ownership, and that function is also used by create_iso().
 static mutex_t clients_mutex;
@@ -196,6 +200,10 @@ static int normalize_path(char *path, int8_t del_last_slash)
 static int initialize_client(client_t *client)
 {
 	memset(client, 0, sizeof(client_t));
+
+	// memset leaves .s at 0, which is a usable descriptor rather than "none";
+	// the caller assigns the real socket once it has one.
+	client->s = NO_SOCKET;
 
 	client->buf = (uint8_t *)malloc(BUFFER_SIZE);
 	if(!client->buf)
@@ -2331,9 +2339,10 @@ int main(int argc, char *argv[])
 
 		sprintf(conn_ip, "%s", inet_ntoa(addr.sin_addr));
 
-		// Pick and reserve a slot under the lock. Everything the client
-		// threads also touch (.connected, .s, .thread, .has_thread) is read
-		// and written here and nowhere else in this loop.
+		// Pick and reserve a slot under the lock. This is the only place in
+		// the loop that reads or writes slot state, and it covers the two
+		// fields a client thread can change underneath us (.connected, .s)
+		// along with the accept-loop-owned .thread / .has_thread.
 		mutex_lock(&clients_mutex);
 
 		// Check for same client
