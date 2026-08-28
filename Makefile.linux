@@ -63,10 +63,13 @@ CPPFLAGS += -DDEBUG -g -O0
 endif
 
 ifeq ($(BUILD_TYPE), release)
+CFLAGS += -O2 -DNDEBUG
+CPPFLAGS += -O2 -DNDEBUG
 endif
 
 ifeq ($(BUILD_TYPE), release_static)
-CFLAGS += -static
+CFLAGS += -static -O2 -DNDEBUG
+CPPFLAGS += -O2 -DNDEBUG
 endif
 
 all: $(OUTPUT)
