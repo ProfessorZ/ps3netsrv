@@ -770,6 +770,13 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 		return FAILED;
 	}
 
+#ifdef TRACE_READS
+	// One line per request: offset and length, nothing else, so a playback
+	// trace can be analysed for request size, seek gaps and revisited blocks.
+	// This printf is on the streaming hot path -- diagnostic builds only.
+	printf("TRACE %llu %u\n", (long long unsigned int)offset, (unsigned int)remaining);
+#endif
+
 	uint32_t read_size = MIN(BUFFER_SIZE, remaining);
 	uint64_t pos = offset;
 
