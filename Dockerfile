@@ -15,6 +15,12 @@ COPY . .
 # falls back to, so an unstamped build stays reproducible.
 ARG BUILD_DATE=unknown
 
+# Set to any non-empty value to build a diagnostic image that logs one line per
+# READ_FILE_CRITICAL, for profiling a console's access pattern with
+# tools/analyse-trace.py. The printf sits on the streaming hot path, so such an
+# image is measurably slower -- never ship one.
+ARG TRACE_READS=
+
 # Makefile.linux is the Linux path the project's own Make.sh uses: it compiles
 # VIsoFile.cpp and defines off64_t=off_t, which is what musl needs.
 #
@@ -30,8 +36,8 @@ ARG BUILD_DATE=unknown
 # costs only the libstdc++ package.
 RUN make -f Makefile.linux \
         BUILD_DATE="${BUILD_DATE}" \
-        CFLAGS="-Wall -std=gnu99 -O3 -s -DNDEBUG" \
-        CXXFLAGS="-Wall -O3 -s -DNDEBUG"
+        CFLAGS="-Wall -std=gnu99 -O3 -s -DNDEBUG${TRACE_READS:+ -DTRACE_READS}" \
+        CXXFLAGS="-Wall -O3 -s -DNDEBUG${TRACE_READS:+ -DTRACE_READS}"
 
 
 FROM alpine:3.20

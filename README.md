@@ -203,6 +203,26 @@ the storage is the bottleneck: move that image to an SSD, or keep it in page
 cache if it is small enough to fit in RAM. Spinning disks, USB 2.0 enclosures,
 and SMB/NFS mounts are the usual offenders.
 
+**If the storage is the bottleneck, profile what the console actually asks
+for** before changing anything. Readahead and retention are different fixes
+for different access patterns:
+
+```bash
+docker build --build-arg TRACE_READS=1 -t ps3netsrv:trace .
+docker run --rm -v /path/to/games:/games:ro -p 38008:38008 ps3netsrv:trace > trace.log
+```
+
+Play the game through the stutter, stop the container, then:
+
+```bash
+python3 tools/analyse-trace.py trace.log
+```
+
+That reports the request size distribution, the seek gaps between consecutive
+reads, how often blocks are revisited, and a simulation of how many disk
+operations a window cache would remove. Never ship a `TRACE_READS` image --
+the printf is on the streaming hot path.
+
 **Check the console's link.** The PS3's built-in WiFi is 802.11g only, and its
 latency jitter alone is enough to stutter a Blu-ray stream. Wired is strongly
 preferred; a powerline or MoCA "wired" run behaves like wireless.
