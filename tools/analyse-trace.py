@@ -16,18 +16,66 @@ import sys
 MB = 1 << 20
 BD_MB_S = 9.0
 
-reads = []
-pattern = re.compile(r"^TRACE (\d+) (\d+)$")
+reads, timed = [], []
+# "TRACE entry_us offset len service_us", or the older "TRACE offset len".
+pattern = re.compile(r"^TRACE (\d+) (\d+)(?: (\d+) (\d+))?$")
 with open(sys.argv[1], errors="replace") as handle:
     for line in handle:
         m = pattern.match(line.strip())
-        if m:
+        if not m:
+            continue
+        if m.group(3) is None:
             reads.append((int(m.group(1)), int(m.group(2))))
+        else:
+            entry, offset = int(m.group(1)), int(m.group(2))
+            length, service = int(m.group(3)), int(m.group(4))
+            reads.append((offset, length))
+            timed.append((entry, service))
 
 if not reads:
     raise SystemExit("no TRACE lines found -- was the server built with -DTRACE_READS?")
 
 print(f"\n{len(reads)} reads, {sum(n for _, n in reads) / MB:.1f} MB requested total\n")
+
+if timed:
+    # Stutter is a tail-latency problem, not an average-throughput one, and
+    # these two columns say who is responsible for each stall.
+    service = sorted(us for _, us in timed)
+    idle = sorted(
+        max(0, nxt_entry - (entry + us))
+        for (entry, us), (nxt_entry, _) in zip(timed, timed[1:])
+    )
+    common = collections.Counter(n for _, n in reads).most_common(1)[0][0]
+    budget_us = common / (BD_MB_S * 1e6) * 1e6   # time per request to hold 9 MB/s
+
+    def at(values, q):
+        return values[min(len(values) - 1, int(len(values) * q))]
+
+    print(f"Per-request budget to sustain {BD_MB_S:.0f} MB/s at "
+          f"{common / 1024:.0f} KiB: {budget_us / 1000:.1f} ms\n")
+    print(f"  {'':<26}{'median':>10}{'p99':>10}{'max':>10}")
+    print(f"  {'server serving (disk)':<26}{at(service, 0.5) / 1000:>9.2f}ms"
+          f"{at(service, 0.99) / 1000:>9.2f}ms{service[-1] / 1000:>9.2f}ms")
+    if idle:
+        print(f"  {'server idle (console/net)':<26}{at(idle, 0.5) / 1000:>9.2f}ms"
+              f"{at(idle, 0.99) / 1000:>9.2f}ms{idle[-1] / 1000:>9.2f}ms")
+
+    over = [us for us in service if us > budget_us]
+    busy, waiting = sum(service), sum(idle)
+    print(f"\n  {len(over)} of {len(service)} reads ({100.0 * len(over) / len(service):.1f}%) "
+          f"took longer than the budget on their own.")
+    if busy + waiting:
+        print(f"  Wall time split: {100.0 * busy / (busy + waiting):.1f}% serving, "
+              f"{100.0 * waiting / (busy + waiting):.1f}% waiting for the console.")
+    if at(service, 0.99) > budget_us:
+        print("  -> the storage stalls past the budget in the tail: that is the")
+        print("     stutter, and it is invisible in an average-throughput number.")
+    elif idle and at(idle, 0.99) > budget_us:
+        print("  -> the server answers well inside budget and then waits. The")
+        print("     bottleneck is the console or the network, not the storage.")
+    else:
+        print("  -> neither side misses the budget; look outside this hop.")
+    print()
 
 # --- request size: the number that sets everything else ---
 sizes = collections.Counter(n for _, n in reads)

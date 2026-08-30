@@ -13,6 +13,10 @@
 #include <signal.h>
 #endif
 
+#ifdef TRACE_READS
+#include <time.h>
+#endif
+
 static const int FAILED		= -1;
 static const int SUCCEEDED	=  0;
 static const int NONE		= -1;
@@ -726,6 +730,17 @@ send_result:
 	return ret;
 }
 
+#ifdef TRACE_READS
+// Monotonic microseconds for read tracing. CLOCK_MONOTONIC rather than wall
+// time so that a clock adjustment mid-capture cannot produce negative gaps.
+static uint64_t trace_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
+}
+#endif
+
 // Report the first zero-filled read for each opened file.
 //
 // Padding a read that runs past the end of an image is normal and expected, so
@@ -771,10 +786,8 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 	}
 
 #ifdef TRACE_READS
-	// One line per request: offset and length, nothing else, so a playback
-	// trace can be analysed for request size, seek gaps and revisited blocks.
-	// This printf is on the streaming hot path -- diagnostic builds only.
-	printf("TRACE %llu %u\n", (long long unsigned int)offset, (unsigned int)remaining);
+	const uint64_t trace_entry = trace_now_us();
+	const uint32_t trace_len = remaining;
 #endif
 
 	uint32_t read_size = MIN(BUFFER_SIZE, remaining);
@@ -835,6 +848,20 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 		pos += read_size;
 		remaining -= read_size;
 	}
+
+#ifdef TRACE_READS
+	// Entry timestamp, offset, length, and how long this request took to
+	// serve. The service time is what separates the two explanations for a
+	// stall: a large value means the server was waiting on the disk, while a
+	// small one followed by a large gap to the next entry timestamp means the
+	// server was idle waiting for the console -- i.e. the network or the
+	// console itself, not the storage.
+	printf("TRACE %llu %llu %u %llu\n",
+		(long long unsigned int)trace_entry,
+		(long long unsigned int)offset,
+		(unsigned int)trace_len,
+		(long long unsigned int)(trace_now_us() - trace_entry));
+#endif
 
 	return SUCCEEDED;
 }
