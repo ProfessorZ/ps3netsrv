@@ -161,6 +161,72 @@ The equivalent in Compose is the `user:` key, which is already present in
 * Third-party ps3netsrv images are also published on Docker Hub:
   https://hub.docker.com/search?q=ps3netsrv
 
+## Troubleshooting stuttering playback
+
+netiso is strictly request/response: the console sends a read command and
+blocks until the whole reply arrives. Anything that adds latency per request,
+or that breaks the connection, is felt directly as stutter in game.
+
+**First, look at the log while the game stutters.** It names the cause more
+often than not:
+
+```bash
+docker logs --since 5m ps3netsrv
+```
+
+| What you see | What it means |
+| --- | --- |
+| `NOTE: read past end of image ...` | The console read past the end of the image and the overhang was zero-filled. Normal at the tail of an image, and logged once per opened file. If it appears at an offset well short of the image size, the server is serving zeros for data it cannot see -- most likely a multi-part set with a part missing. |
+| `ERROR: read_file failed on read file critical command!` | A read failed and the connection was dropped, so the console must reconnect and reopen. Reads that merely overhang the end of an image no longer land here, so this now points at the storage under the share. |
+| Repeated `Connection from` / `Reconnection from` | The connection is being torn down and re-established mid-play. The server also drops an existing client when a second connection arrives from the same IP. |
+| Nothing at all during a stutter | The server is not the bottleneck. Look at the storage holding the ISO, or at the console's link. |
+
+**Then measure the storage the way the console reads it.** `tools/ps3netsrv-probe.py`
+speaks the netiso protocol against a running server and times a sequential pass
+and a random-offset pass over a real image:
+
+```bash
+python3 tools/ps3netsrv-probe.py 127.0.0.1 38008 "/PS3ISO/YourGame.iso"
+```
+
+The gap between the two passes is the whole point, so do not substitute a
+sequential `dd`. The server reads and sends serially, with no readahead and no
+pipelining, so every request pays the storage's full access latency before a
+single byte reaches the console. A spinning disk streams sequentially at well
+over 100 MB/s while delivering under 8 MB/s once the reads stop being
+sequential -- and game data access is not sequential. A sequential benchmark
+therefore gives a confident all-clear on exactly the disk that is starving the
+console.
+
+A PS3 Blu-ray drive tops out around 9 MB/s. If the random pass is below that,
+the storage is the bottleneck: move that image to an SSD, or keep it in page
+cache if it is small enough to fit in RAM. Spinning disks, USB 2.0 enclosures,
+and SMB/NFS mounts are the usual offenders.
+
+**If the storage is the bottleneck, profile what the console actually asks
+for** before changing anything. Readahead and retention are different fixes
+for different access patterns:
+
+```bash
+docker build --build-arg TRACE_READS=1 -t ps3netsrv:trace .
+docker run --rm -v /path/to/games:/games:ro -p 38008:38008 ps3netsrv:trace > trace.log
+```
+
+Play the game through the stutter, stop the container, then:
+
+```bash
+python3 tools/analyse-trace.py trace.log
+```
+
+That reports the request size distribution, the seek gaps between consecutive
+reads, how often blocks are revisited, and a simulation of how many disk
+operations a window cache would remove. Never ship a `TRACE_READS` image --
+the printf is on the streaming hot path.
+
+**Check the console's link.** The PS3's built-in WiFi is 802.11g only, and its
+latency jitter alone is enough to stutter a Blu-ray stream. Wired is strongly
+preferred; a powerline or MoCA "wired" run behaves like wireless.
+
 # Other ports / forks
 The ps3netsrv has been ported to multiple platforms (Windows, linux, FreeBSD, MacOS, PS3, Android, Java)<br>
 

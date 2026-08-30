@@ -61,6 +61,8 @@ typedef struct _client_t
 	int has_thread; // `thread` holds a started thread that still needs joining
 	uint16_t CD_SECTOR_SIZE;
 	int subdirs;
+	uint64_t ro_file_size;
+	int eof_pad_logged;
 } client_t;
 
 // Sentinel for client_t.s, which is a plain int socket -- not a file_t. The
@@ -219,6 +221,8 @@ static int initialize_client(client_t *client)
 	client->connected = 1;
 	client->CD_SECTOR_SIZE = 2352;
 	client->subdirs = 0;
+	client->ro_file_size = 0;
+	client->eof_pad_logged = 0;
 
 	return SUCCEEDED;
 }
@@ -658,6 +662,9 @@ static int process_open_cmd(client_t *client, netiso_open_cmd *cmd)
 		client->ro_file = NULL;
 	}
 
+	client->ro_file_size = 0;
+	client->eof_pad_logged = 0;
+
 	if((fp_len == 10) && (!strcmp(filepath, "/CLOSEFILE")))
 	{
 		ret = SUCCEEDED;
@@ -710,6 +717,8 @@ static int process_open_cmd(client_t *client, netiso_open_cmd *cmd)
 			result.file_size = BE64(st.file_size);
 			result.mtime = BE64(st.mtime);
 
+			client->ro_file_size = st.file_size;
+
 			fp_len = rlen + strlen(filepath + rlen);
 
 			if ((fp_len > 4) && (strstr(".PNG.JPG.png.jpg.SFO", filepath + fp_len - 4) != NULL))
@@ -757,6 +766,30 @@ send_result:
 	return ret;
 }
 
+// Report the first zero-filled read for each opened file.
+//
+// Padding a read that runs past the end of an image is normal and expected, so
+// this must not be a per-request printf on the streaming hot path. Reporting it
+// once per file keeps the condition diagnosable: a game that pads a handful of
+// times at the tail of its image is healthy, whereas padding that starts early
+// and never stops means the server is serving zeros for data it cannot see --
+// an incomplete multi-part set, say, where File::open() stopped at a missing
+// part and fstat() summed only the parts it found.
+static void log_eof_padding(client_t *client, uint64_t pos)
+{
+	if(client->eof_pad_logged) return;
+
+	client->eof_pad_logged = 1;
+
+#ifdef WIN32
+	printf("NOTE: read past end of image at offset 0x%I64x (image size 0x%I64x); padding with zeros\n",
+		pos, client->ro_file_size);
+#else
+	printf("NOTE: read past end of image at offset 0x%llx (image size 0x%llx); padding with zeros\n",
+		(long long unsigned int)pos, (long long unsigned int)client->ro_file_size);
+#endif
+}
+
 static int process_read_file_critical(client_t *client, netiso_read_file_critical_cmd *cmd)
 {
 	if ((!client->ro_file) || (!client->buf))
@@ -777,7 +810,15 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 		return FAILED;
 	}
 
+#ifdef TRACE_READS
+	// One line per request: offset and length, nothing else, so a playback
+	// trace can be analysed for request size, seek gaps and revisited blocks.
+	// This printf is on the streaming hot path -- diagnostic builds only.
+	printf("TRACE %llu %u\n", (long long unsigned int)offset, (unsigned int)remaining);
+#endif
+
 	uint32_t read_size = MIN(BUFFER_SIZE, remaining);
+	uint64_t pos = offset;
 
 	while (remaining > 0)
 	{
@@ -788,10 +829,40 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 		}
 
 		ssize_t read_ret = client->ro_file->read(client->buf, read_size);
-		if ((read_ret < 0) || (static_cast<size_t>(read_ret) != read_size))
+		if(read_ret < 0)
 		{
 			printf("ERROR: read_file failed on read file critical command!\n");
 			return FAILED;
+		}
+
+		if(static_cast<size_t>(read_ret) != read_size)
+		{
+			// A short read that reaches the end of the image is expected, not a
+			// failure. The console reads in fixed-size chunks, so an image whose
+			// length is not a whole multiple of that chunk makes the last
+			// request of a sequential run overhang the end.
+			//
+			// This command carries no length field -- the client consumes
+			// exactly num_bytes and then sends its next command -- so short-
+			// replying would desync the stream. Zero-filling the overhang is the
+			// only answer that keeps both ends aligned. Failing here instead
+			// tears the connection down mid-stream and forces the console to
+			// reconnect and reopen, which is felt as a stall during playback.
+			//
+			// ro_file_size is always trustworthy here: process_open_cmd nulls
+			// ro_file when either open() or fstat() fails, and this function
+			// refuses a NULL ro_file, so a recorded size of 0 means an empty
+			// file rather than an unknown one. Empty files therefore pad like
+			// any other read that starts at the end.
+			if((pos + (uint64_t)read_ret) < client->ro_file_size)
+			{
+				// Short of the end of the file: a real I/O error, still fatal.
+				printf("ERROR: read_file failed on read file critical command!\n");
+				return FAILED;
+			}
+
+			log_eof_padding(client, pos + (uint64_t)read_ret);
+			memset(client->buf + read_ret, 0, read_size - read_ret);
 		}
 
 		int send_ret = send(client->s, (char *)client->buf, read_size, 0);
@@ -801,6 +872,7 @@ static int process_read_file_critical(client_t *client, netiso_read_file_critica
 			return FAILED;
 		}
 
+		pos += read_size;
 		remaining -= read_size;
 	}
 
@@ -844,7 +916,20 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 		if (scratch)
 		{
 			client->ro_file->seek(offset + 24, SEEK_SET);
-			if (client->ro_file->read(scratch, span) != (ssize_t)span)
+			ssize_t bulk_ret = client->ro_file->read(scratch, span);
+
+			// As in process_read_file_critical: the tail of the image may fall
+			// short of the requested span, and this command has no length field
+			// either, so pad rather than drop the connection.
+			if ((bulk_ret >= 0) && ((size_t)bulk_ret < span) &&
+			    ((offset + 24 + (uint64_t)bulk_ret) >= client->ro_file_size))
+			{
+				log_eof_padding(client, offset + 24 + (uint64_t)bulk_ret);
+				memset(scratch + bulk_ret, 0, span - (size_t)bulk_ret);
+				bulk_ret = (ssize_t)span;
+			}
+
+			if (bulk_ret != (ssize_t)span)
 			{
 				free(scratch);
 				printf("ERROR: read_file failed on read cd 2048 critical command!\n");
@@ -868,7 +953,17 @@ static int process_read_cd_2048_critical_cmd(client_t *client, netiso_read_cd_20
 		for (uint32_t i = 0; i < sector_count; i++)
 		{
 			client->ro_file->seek(offset + 24, SEEK_SET);
-			if(client->ro_file->read(buf, 2048) != 2048)
+			ssize_t sec_ret = client->ro_file->read(buf, 2048);
+
+			if ((sec_ret >= 0) && (sec_ret < 2048) &&
+			    ((offset + 24 + (uint64_t)sec_ret) >= client->ro_file_size))
+			{
+				log_eof_padding(client, offset + 24 + (uint64_t)sec_ret);
+				memset(buf + sec_ret, 0, 2048 - (size_t)sec_ret);
+				sec_ret = 2048;
+			}
+
+			if(sec_ret != 2048)
 			{
 				printf("ERROR: read_file failed on read cd 2048 critical command!\n");
 				return FAILED;
@@ -2436,6 +2531,16 @@ int main(int argc, char *argv[])
 			closesocket(cs);
 			continue;
 		}
+
+		// netiso is strictly request/response: the console sends a command and
+		// blocks until the entire reply has arrived. Nagle can hold back the
+		// trailing partial segment of a reply until the console ACKs earlier
+		// data, and the console has nothing to piggyback that ACK on because it
+		// is still waiting for that very segment -- a delayed-ACK timeout per
+		// request in the worst case. Best effort: a kernel refusing it is
+		// harmless.
+		int nodelay = 1;
+		setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
 
 		clients[i].s = cs;
 		clients[i].ip_addr = addr.sin_addr;

@@ -23,8 +23,8 @@ LDFLAGS = -L.
 LIBS = -lstdc++ -lpthread
 
 ifeq ($(BUILD_TYPE), release_static)
-CFLAGS += -static
-CPPFLAGS += -static
+CFLAGS += -static -O2 -DNDEBUG
+CPPFLAGS += -static -O2 -DNDEBUG
 endif
 
 ifeq ($(BUILD_TYPE), debug)
