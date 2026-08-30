@@ -62,8 +62,46 @@ for label, count in gaps.most_common():
     print(f"  {label:<18} {count:>7}  {100.0 * count / transitions:5.1f}%")
 
 local = gaps["contiguous"] + gaps["forward < 1 MB"]
-print(f"  -> {100.0 * local / transitions:.1f}% of reads land near the previous one "
-      f"({'readahead should pay off' if local / transitions > 0.5 else 'too scattered for readahead alone'})")
+print(f"  -> {100.0 * local / transitions:.1f}% of reads land near the previous one")
+
+# --- streams: are these several sequential readers interleaved? ---
+#
+# Gap analysis alone cannot tell "scattered" from "two sequential streams
+# alternating", and the two call for opposite conclusions: the second is still
+# sequential access and wants per-stream readahead, not a verdict of
+# "too random for readahead". Attribute each read to a stream it continues.
+TOLERANCE = 4 * MB
+streams = collections.OrderedDict()   # id -> next expected offset
+continued, started, next_id = 0, 0, 0
+for off, n in reads:
+    match = None
+    for sid, expected in streams.items():
+        if abs(off - expected) <= TOLERANCE:
+            match = sid
+            break
+    if match is None:
+        match, next_id = next_id, next_id + 1
+        started += 1
+    else:
+        continued += 1
+    streams[match] = off + n
+    streams.move_to_end(match)
+    while len(streams) > 16:          # only recent streams stay candidates
+        streams.popitem(last=False)
+
+share = 100.0 * continued / len(reads)
+print(f"\nStream structure: {started} stream starts, "
+      f"{continued} reads continued one ({share:.1f}%)")
+if share > 80.0 and started > 1:
+    print(f"  -> not random at all: ~{started} sequential streams interleaved.")
+    print("     Every read shares one descriptor, so they share one kernel")
+    print("     readahead state and defeat it. Per-stream readahead is the fix.")
+elif share > 80.0:
+    print("  -> essentially one sequential stream; readahead already applies.")
+elif local / transitions > 0.5:
+    print("  -> mostly local access; a larger readahead window should pay off.")
+else:
+    print("  -> genuinely scattered; readahead alone will not help.")
 
 # --- revisits: does retention have anything to latch onto? ---
 BLOCK = 1 * MB

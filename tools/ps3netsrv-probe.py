@@ -2,16 +2,29 @@
 """Measure a live ps3netsrv the way a PS3 experiences it.
 
 Speaks the netiso wire protocol and issues READ_FILE_CRITICAL requests against
-a real image, sequentially and then at random offsets. The random pass is the
-one that matters: game data access is seeky, and on a spinning disk each seek
-is paid in full before any byte reaches the console, because the server reads
-and sends strictly serially with no readahead.
+a real image under four access patterns, because the interesting cases sit
+between "perfectly sequential" and "uniformly random":
+
+  1 stream    - the server's best case; rides the kernel readahead.
+  2 streams   - two sequential reads interleaved, far apart in the image.
+  4 streams   - four of them.
+  random      - uniform offsets; the worst case, and not realistic.
+
+The interleaved passes are the point. A game playing a video while streaming
+other assets produces several individually-sequential reads at once, but
+ps3netsrv opens the image once and issues every read on a single descriptor,
+so they share one kernel readahead state. Linux decides sequentiality per
+descriptor by checking whether each read continues where the last ended, so
+alternating between distant regions looks non-sequential, readahead backs off,
+and the disk thrashes -- even though every individual stream is sequential.
+
+If the multi-stream numbers collapse toward the random one, that is the
+mechanism, and it explains stutter during a video that "should" be sequential.
 
 Usage:
   ps3netsrv-probe.py HOST PORT /PS3ISO/YourGame.iso
 
-A PS3 Blu-ray drive tops out near 9 MB/s. Anything below that in the random
-pass will stutter in game.
+A PS3 Blu-ray drive tops out near 9 MB/s.
 """
 
 import random
@@ -46,14 +59,14 @@ def open_image(sock, path):
     return size
 
 
-def run_pass(sock, size, label, pick_offset):
+def run_pass(sock, label, offsets):
     import time
 
     latencies = []
     read = 0
     start = time.perf_counter()
     while time.perf_counter() - start < DURATION:
-        offset = pick_offset(read)
+        offset = next(offsets)
         t0 = time.perf_counter()
         sock.sendall(struct.pack(">HHIQ", 0x1225, 0, REQ, offset))
         recv_exact(sock, REQ)
@@ -64,10 +77,44 @@ def run_pass(sock, size, label, pick_offset):
     latencies.sort()
     rate = read / elapsed / 1e6
     verdict = "OK" if rate >= BD_MB_S else "TOO SLOW"
-    print(f"  {label:<22} {rate:7.1f} MB/s   "
+    print(f"  {label:<24} {rate:7.1f} MB/s   "
           f"median {statistics.median(latencies):7.2f} ms   "
           f"p99 {latencies[int(len(latencies) * 0.99)]:7.2f} ms   [{verdict}]")
     return rate
+
+
+def interleaved(span, count):
+    """Strictly alternate between `count` sequential streams.
+
+    The streams start far apart so the drive's own cache and the I/O elevator
+    cannot mask the effect, and they alternate every single request -- reading
+    in bursts would re-trigger the kernel's sequential detection and hide the
+    very thing being measured.
+    """
+    stride = span // count
+    positions = [i * stride for i in range(count)]
+    while True:
+        for i in range(count):
+            yield positions[i] & ~2047
+            positions[i] += REQ
+            if positions[i] >= (i + 1) * stride - REQ:
+                positions[i] = i * stride
+
+
+def sequential(span):
+    base = span // 4
+    position = base
+    while True:
+        yield position & ~2047
+        position += REQ
+        if position >= base + span // 2:
+            position = base
+
+
+def uniform_random(span):
+    rng = random.Random(1)
+    while True:
+        yield rng.randrange(0, span) & ~2047
 
 
 def main():
@@ -83,30 +130,30 @@ def main():
           f"a PS3 Blu-ray needs ~{BD_MB_S:.0f} MB/s\n")
 
     span = size - REQ
-    # Sequential from a fixed point: rides the OS readahead, so this is the
-    # server's best case and mostly reflects the link.
-    seq_base = span // 4
-    seq = run_pass(sock, size, "sequential", lambda read: seq_base + read % (span // 2))
-
-    # Random across the whole image: defeats readahead and forces a real seek
-    # per request, which is what game data access looks like.
-    rng = random.Random(1)
-    rnd = run_pass(sock, size, "random (the real test)",
-                   lambda read: rng.randrange(0, span) & ~2047)
+    one = run_pass(sock, "1 stream (best case)", sequential(span))
+    two = run_pass(sock, "2 streams interleaved", interleaved(span, 2))
+    four = run_pass(sock, "4 streams interleaved", interleaved(span, 4))
+    rnd = run_pass(sock, "uniform random (worst)", uniform_random(span))
     sock.close()
 
     print()
-    if rnd >= BD_MB_S:
-        print("  Storage keeps up. Look at the console's link or webMAN next.")
-    elif seq >= BD_MB_S:
-        print("  Sequential is fine but random is not: this is seek latency.")
-        print("  The ISO is on a spinning disk and the server reads serially,")
-        print("  so every request pays a full seek. Moving this one image to an")
-        print("  SSD is the fix; caching the whole thing in RAM also works if")
-        print("  the host has room to spare.")
+    worst_stream = min(two, four)
+    if worst_stream >= BD_MB_S and rnd >= BD_MB_S:
+        print("  Storage keeps up under every pattern. Look elsewhere: the")
+        print("  console's link, webMAN, or the game itself.")
+    elif one >= BD_MB_S and worst_stream < BD_MB_S:
+        print(f"  One stream reaches {one:.0f} MB/s but interleaving collapses it to")
+        print(f"  {worst_stream:.1f} MB/s -- below what the console needs. Every read")
+        print("  goes through one descriptor, so concurrent sequential streams")
+        print("  share a single readahead state and defeat it. This is why a")
+        print("  video that 'should' be sequential can still stutter.")
+    elif one < BD_MB_S:
+        print("  Even a single sequential stream is below what the console needs.")
+        print("  The share itself is the bottleneck, not the access pattern.")
     else:
-        print("  Even sequential reads are below what the console needs -- the")
-        print("  share is the bottleneck, not the access pattern.")
+        print("  Interleaved streams hold up; only uniform random fails, and real")
+        print("  workloads are not uniformly random. Storage is likely not your")
+        print("  problem -- capture a TRACE_READS log to see the real pattern.")
 
 
 if __name__ == "__main__":
